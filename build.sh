@@ -12,8 +12,8 @@ for ARCH in arm64 x86_64; do
     xcrun swiftc -swift-version 5 -O -target "$ARCH-apple-macosx13.0" -sdk "$SDK" \
         -module-cache-path "$BUILD_DIR/module-cache" \
         -import-objc-header "$SOURCE_DIR/Sources/DisplayBridge.h" \
-        "$SOURCE_DIR/Sources/Localization.swift" "$SOURCE_DIR/Sources/DisplayModel.swift" "$SOURCE_DIR/Sources/LoginItems.swift" "$SOURCE_DIR/Sources/MenuApp.swift" "$SOURCE_DIR/Sources/main.swift" \
-        "$BUILD_DIR/bridge-$ARCH.o" -framework AppKit -framework CoreGraphics -framework ColorSync -framework ServiceManagement \
+        "$SOURCE_DIR/Sources/Localization.swift" "$SOURCE_DIR/Sources/DisplayConnections.swift" "$SOURCE_DIR/Sources/DisplayModel.swift" "$SOURCE_DIR/Sources/LoginItems.swift" "$SOURCE_DIR/Sources/MenuApp.swift" "$SOURCE_DIR/Sources/main.swift" \
+        "$BUILD_DIR/bridge-$ARCH.o" -framework AppKit -framework CoreGraphics -framework ColorSync -framework ServiceManagement -framework IOKit \
         -o "$BUILD_DIR/DisplayOutputSwitch-$ARCH"
 done
 APP="$DESTINATION/MonitorOnOff.app"

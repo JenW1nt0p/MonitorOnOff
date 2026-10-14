@@ -64,8 +64,10 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if manager == nil || manager.owned.isEmpty { return .terminateNow }
+        if manager == nil { return .terminateNow }
         if busy { return .terminateCancel }
+        do { try manager.refresh() } catch { return .terminateCancel }
+        if manager.connectedOwned.isEmpty { return .terminateNow }
         guard !quitting else { return .terminateLater }
         restoreAll(thenQuit: true)
         return .terminateLater
@@ -105,6 +107,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let disabled = manager.displays.filter { !$0.enabled && manager.owned[$0.uuid] != nil }.count
         statusItem?.button?.title = disabled == 0 ? "" : " \(disabled)"
         statusItem?.button?.toolTip = disabled == 0 ? "MonitorOnOff" : L10n.format("status.tooltip_disabled", disabled)
+        rebuildMenu()
     }
 
     private func item(_ title: String, action: Selector? = nil, key: String = "", enabled: Bool = true) -> NSMenuItem {
@@ -174,15 +177,13 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     submenu.addItem(item(L10n.text("safety.builtin"), enabled: false))
                 } else if display.enabled && !allowed {
                     submenu.addItem(item(L10n.text("safety.last_display"), enabled: false))
-                } else if !display.online {
-                    submenu.addItem(item(L10n.text("safety.reconnect"), enabled: false))
                 }
                 label.submenu = submenu
                 label.state = display.enabled ? .on : .off
                 menu.addItem(label)
             }
             menu.addItem(.separator())
-            menu.addItem(item(L10n.text("menu.restore"), action: #selector(restoreAction), enabled: !manager.owned.isEmpty && DOSBackendAvailable()))
+            menu.addItem(item(L10n.text("menu.restore"), action: #selector(restoreAction), enabled: !manager.connectedOwned.isEmpty && DOSBackendAvailable()))
         }
         menu.addItem(item(L10n.text("menu.refresh"), action: #selector(refreshAction)))
         menu.addItem(.separator())
@@ -199,16 +200,17 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleDisplay(_ sender: NSMenuItem) {
-        guard !busy, let uuid = sender.representedObject as? String,
-              let display = manager.displays.first(where: { $0.uuid == uuid }) else { return }
+        guard !busy, let uuid = sender.representedObject as? String else { return }
+        refresh()
+        guard let display = manager.displays.first(where: { $0.uuid == uuid }) else { return }
         busy = true
         do {
             if display.enabled { try manager.disable(uuid) }
             else { try manager.enable(uuid) }
         } catch {
             busy = false
-            showError(error.localizedDescription)
             refresh()
+            if manager.displays.contains(where: { $0.uuid == uuid }) { showError(error.localizedDescription) }
             return
         }
         // 配置提交后，给 WindowServer 和驱动留出更新列表的时间。
@@ -221,6 +223,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.showError(L10n.text("error.output_still_on"))
                 }
             } else {
+                guard self.manager.displays.contains(where: { $0.uuid == uuid }) else { return }
                 if DisplaySystem.isEnabled(DisplaySystem.resolve(display)) {
                     do { try self.manager.enable(uuid) } catch { self.showError(error.localizedDescription) }
                 } else {
@@ -239,7 +242,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             // 驱动更新后再确认；保留未能确认的恢复记录。
             var remainingErrors = errors
-            for record in Array(manager.owned.values) {
+            self.refresh()
+            for record in manager.connectedOwned {
                 if DisplaySystem.isEnabled(DisplaySystem.resolve(record)) {
                     do { try manager.enable(record.uuid) }
                     catch { remainingErrors.append(error.localizedDescription) }
@@ -247,11 +251,11 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             self.busy = false
             self.refresh()
-            if manager.owned.isEmpty {
+            if manager.connectedOwned.isEmpty {
                 if thenQuit { NSApp.reply(toApplicationShouldTerminate: true) }
                 return
             }
-            let names = manager.owned.values.map(\.localizedName).sorted().joined(separator: L10n.text("list.separator"))
+            let names = manager.connectedOwned.map(\.localizedName).sorted().joined(separator: L10n.text("list.separator"))
             let explanation = L10n.format("restore.incomplete_details", names)
                 + (remainingErrors.isEmpty ? "" : "\n\n" + remainingErrors.joined(separator: "\n"))
             if thenQuit {

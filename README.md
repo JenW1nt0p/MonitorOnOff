@@ -9,9 +9,9 @@ A native macOS menu bar utility for turning external display output on and off.
 ## Features
 
 - Control multiple external displays independently from the menu bar.
-- Keep a restore entry for displays that disappear from the system list after their output is turned off.
+- Keep a restore entry for physically connected displays whose output is turned off; unplugged displays disappear automatically.
 - Protect the built-in display and keep at least one output enabled.
-- Restore outputs turned off by the app when quitting. If restoration fails, keep recovery records for the next launch.
+- Restore connected outputs turned off by the app when quitting. Retain records for unplugged displays and keep recovery records when restoration fails.
 - Refresh on display connection changes.
 - Launch at login by default on first launch, with a menu option to disable it.
 - Follow the macOS preferred language: English, Simplified Chinese, Traditional Chinese, Korean, and Japanese. Unsupported preferences fall back to English.
@@ -57,7 +57,7 @@ python3 Tests/localization.py dist/MonitorOnOff.app
 dist/MonitorOnOff.app/Contents/MacOS/MonitorOnOff --diagnostics
 ```
 
-Logic tests use a simulated display backend and do not change real outputs or login items. Localization tests check all 225 catalog entries and 14 language preference scenarios.
+Logic tests include unplugging after software output-off, clicking stale menu entries, reconnecting with a new display ID, and independent handling of multiple displays. They use a simulated display backend and do not change real outputs or login items. Localization tests check all 225 catalog entries and 14 language preference scenarios.
 
 For a native menu test, using an isolated recovery journal:
 
@@ -82,6 +82,8 @@ dist/MonitorOnOff.app/Contents/MacOS/MonitorOnOff --localization-diagnostics
 `DisplayBridge.c` dynamically loads the non-public CoreGraphics function `CGSConfigureDisplayEnabled` and uses a display configuration transaction with `kCGConfigureForSession`. It checks the begin, configure, and commit results. This interface may change or disappear in future macOS releases; the app disables switching if the symbol is unavailable.
 
 `DisplayModel.swift` tracks displays by UUID and stores recovery records in `~/Library/Application Support/DisplayOutputSwitch/recovery.json`. The original bundle ID and data directory are retained for upgrade compatibility. The journal contains display metadata; it is never uploaded.
+
+`DisplayConnections.swift` reads IOKit connection services. For offline displays on Apple Silicon, it matches EDID hardware identity against DisplayPort endpoints with an asserted hot-plug signal; on Intel, it checks existing `IODisplayConnect` services. It saves the endpoint path when a unique match is available. Offline devices with ambiguous or unavailable connection information are hidden until detected again, while their recovery records remain saved. A cached display ID or hardware identity alone is insufficient evidence of a physical connection.
 
 `LoginItems.swift` uses the public `SMAppService.mainApp` API. After applying the first-launch default once, the app respects changes made in its menu or System Settings. The app must remain at a stable installed path for launch at login to work reliably.
 

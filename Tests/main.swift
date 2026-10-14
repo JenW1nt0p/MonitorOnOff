@@ -24,7 +24,10 @@ check(!DisplayPolicy.canDisable(external, among: [offline, external]), "离线�
 var disabled = internalScreen
 disabled.enabled = false
 check(!DisplayPolicy.canDisable(external, among: [disabled, external]), "关闭的屏不计入安全输出")
-check(DisplayPolicy.merge([internalScreen], owned: [external.uuid: external]).contains(where: { $0.uuid == external.uuid && !$0.enabled }), "软件关闭后保留开启入口")
+check(DisplayPolicy.merge([internalScreen], owned: [external.uuid: external], connected: { _ in true }).contains(where: { $0.uuid == external.uuid && !$0.enabled }), "软件关闭后保留开启入口")
+check(!DisplayPolicy.merge([internalScreen], owned: [external.uuid: external], connected: { _ in false }).contains(where: { $0.uuid == external.uuid }), "物理拔线后不补回缓存显示器")
+check(!DisplayPolicy.merge([internalScreen, external], owned: [:], connected: { $0.uuid != external.uuid }).contains(where: { $0.uuid == external.uuid }),
+      "端口已拔线时隐藏尚未更新的系统在线条目")
 
 final class FakeSystem {
     var live = [internalScreen, external, externalB]
@@ -32,6 +35,7 @@ final class FakeSystem {
     var result = DOSResult(code: 0, stage: 0)
     var delayedEnable = false
     var identityMatches = true
+    var connectedUUIDs: Set<String> = [internalScreen.uuid, external.uuid, externalB.uuid]
     func manager(_ journal: RecoveryJournal) throws -> DisplayManager {
         try DisplayManager(journal: journal, setOutput: { [self] id, enabled in
             calls.append((id, enabled))
@@ -44,7 +48,7 @@ final class FakeSystem {
             return result
         }, enumerate: { [self] in live }, resolve: { $0.id }, enabled: { [self] id in
             live.contains { $0.id == id && $0.enabled && $0.online }
-        }, matchesIdentity: { [self] _, _ in identityMatches })
+        }, connected: { [self] in connectedUUIDs.contains($0.uuid) }, matchesIdentity: { [self] _, _ in identityMatches })
     }
 }
 func journal(_ name: String) -> RecoveryJournal { RecoveryJournal(url: root.appendingPathComponent("\(name)/recovery.json")) }
@@ -98,6 +102,68 @@ let protectedSystem = FakeSystem()
 protectedSystem.live = [external]
 let protectedManager = try protectedSystem.manager(journal("last-screen"))
 check(rejects { try protectedManager.disable(external.uuid) } && protectedSystem.calls.isEmpty, "执行时再次检查最后一块输出")
+
+let unpluggedSystem = FakeSystem()
+let unpluggedJournal = journal("unplugged")
+let unpluggedManager = try unpluggedSystem.manager(unpluggedJournal)
+try unpluggedManager.disable(external.uuid)
+unpluggedSystem.connectedUUIDs.remove(external.uuid)
+try unpluggedManager.refresh()
+check(!unpluggedManager.displays.contains(where: { $0.uuid == external.uuid }), "软件关闭后拔线自动隐藏菜单项")
+check(unpluggedManager.owned[external.uuid] != nil, "拔线只隐藏设备，不删除恢复记录")
+let callsBeforeUnpluggedAction = unpluggedSystem.calls.count
+try unpluggedManager.enable(external.uuid)
+check(unpluggedSystem.calls.count == callsBeforeUnpluggedAction, "旧菜单项点击不向拔线设备提交配置")
+check(unpluggedManager.restoreAll().isEmpty && unpluggedManager.connectedOwned.isEmpty && unpluggedSystem.calls.count == callsBeforeUnpluggedAction,
+      "恢复和退出跳过拔线设备，不误报提交失败")
+let unpluggedRestart = try unpluggedSystem.manager(unpluggedJournal)
+check(!unpluggedRestart.displays.contains(where: { $0.uuid == external.uuid }) && unpluggedRestart.owned[external.uuid] != nil,
+      "重启后继续隐藏拔线记录")
+
+unpluggedSystem.connectedUUIDs.insert(external.uuid)
+try unpluggedManager.refresh()
+check(unpluggedManager.displays.contains(where: { $0.uuid == external.uuid && !$0.enabled }), "接回但仍关闭输出时恢复开启入口")
+var replugged = external
+replugged.id = 2002
+replugged.enabled = false
+replugged.online = false
+unpluggedSystem.live.append(replugged)
+try unpluggedManager.enable(external.uuid)
+check(unpluggedSystem.calls.last?.0 == 2002 && unpluggedSystem.calls.last?.1 == true, "接回后使用新枚举的显示器编号")
+
+let raceSystem = FakeSystem()
+let raceManager = try raceSystem.manager(journal("unplug-after-menu"))
+try raceManager.disable(external.uuid)
+raceSystem.connectedUUIDs.remove(external.uuid)
+let raceCalls = raceSystem.calls.count
+try raceManager.enable(external.uuid)
+check(raceSystem.calls.count == raceCalls && !raceManager.displays.contains(where: { $0.uuid == external.uuid }),
+      "点击前再次检查拔线，避免缓存状态竞态")
+
+let multiSystem = FakeSystem()
+let multiManager = try multiSystem.manager(journal("unplug-multi"))
+try multiManager.disable(external.uuid)
+try multiManager.disable(externalB.uuid)
+multiSystem.connectedUUIDs.remove(external.uuid)
+try multiManager.refresh()
+check(!multiManager.displays.contains(where: { $0.uuid == external.uuid }) && multiManager.displays.contains(where: { $0.uuid == externalB.uuid }),
+      "拔掉 A 不隐藏仍连接的软件关闭屏幕 B")
+
+let normalUnplugSystem = FakeSystem()
+let normalUnplugManager = try normalUnplugSystem.manager(journal("normal-unplug"))
+normalUnplugSystem.live.removeAll { $0.uuid == external.uuid }
+normalUnplugSystem.connectedUUIDs.remove(external.uuid)
+try normalUnplugManager.refresh()
+check(!normalUnplugManager.displays.contains(where: { $0.uuid == external.uuid }), "普通开启屏幕拔线后从菜单消失")
+
+let legacyJSON = Data("{\"uuid\":\"old\",\"id\":3,\"name\":\"old\",\"builtIn\":false,\"enabled\":true,\"online\":true,\"main\":false}".utf8)
+let legacyRecord = try JSONDecoder().decode(DisplayRecord.self, from: legacyJSON)
+check(legacyRecord.hardware == nil && legacyRecord.connectionPath == nil, "兼容旧版无硬件连接信息的恢复记录")
+var edid = Data([0,255,255,255,255,255,255,0,0x12,0x34,0x78,0x56,0xef,0xcd,0xab,0x90])
+let identity = DisplayHardwareIdentity(edid: edid)
+check(identity?.vendor == 0x1234 && identity?.product == 0x5678 && identity?.serial == 0x90abcdef, "EDID 硬件身份字节顺序正确")
+edid[0] = 1
+check(DisplayHardwareIdentity(edid: edid) == nil && DisplayHardwareIdentity(edid: Data()) == nil, "拒绝损坏或不完整的 EDID")
 
 final class FakeLoginItems {
     var initialized = false

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.1
+
+- Hide unplugged displays even when their output recovery records remain saved.
+- Check physical connection state independently of software output state.
+- Refresh the menu automatically and check presence again before switching outputs.
+- Skip disconnected displays during restore and normal quit; retain their recovery records for reconnection.
+
 ## 1.3
 
 First public release.

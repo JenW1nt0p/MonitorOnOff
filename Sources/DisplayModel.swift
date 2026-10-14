@@ -10,6 +10,8 @@ struct DisplayRecord: Codable, Equatable {
     var online: Bool
     var main: Bool
     var usesFallbackName: Bool? = nil
+    var hardware: DisplayHardwareIdentity? = nil
+    var connectionPath: String? = nil
 
     var localizedName: String {
         guard usesFallbackName == true else { return name }
@@ -25,10 +27,10 @@ enum DisplayPolicy {
         }
     }
 
-    static func merge(_ live: [DisplayRecord], owned: [String: DisplayRecord]) -> [DisplayRecord] {
-        var merged = Dictionary(live.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
-        // 软件关闭后可能从系统列表消失，保留重新开启入口。
-        for (uuid, record) in owned where merged[uuid] == nil {
+    static func merge(_ live: [DisplayRecord], owned: [String: DisplayRecord], connected: (DisplayRecord) -> Bool) -> [DisplayRecord] {
+        var merged = Dictionary(live.filter(connected).map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
+        // 只为仍有物理连接的软件关闭设备补回开启入口。
+        for (uuid, record) in owned where merged[uuid] == nil && connected(record) {
             var remembered = record
             remembered.enabled = false
             remembered.online = false
@@ -70,6 +72,7 @@ enum DisplaySystem {
         error = CGGetOnlineDisplayList(capacity, &ids, &count)
         guard error == .success else { throw DisplayFailure(message: L10n.format("error.enumerate", error.rawValue)) }
         var names: [UInt32: String] = [:]
+        let connections = DisplayConnections.connected()
         for screen in NSScreen.screens {
             if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
                 names[number.uint32Value] = screen.localizedName
@@ -77,10 +80,13 @@ enum DisplaySystem {
         }
         return ids.prefix(Int(count)).map { id in
             let builtIn = CGDisplayIsBuiltin(id) != 0
+            let hardware = DisplayHardwareIdentity(displayID: id)
+            let matches = DisplayConnections.matching(hardware, in: connections)
             return DisplayRecord(uuid: uuid(for: id), id: id,
                 name: names[id] ?? (builtIn ? L10n.text("display.builtin_name") : L10n.format("display.external_name", id)),
                 builtIn: builtIn, enabled: isEnabled(id), online: CGDisplayIsOnline(id) != 0,
-                main: CGDisplayIsMain(id) != 0, usesFallbackName: names[id] == nil)
+                main: CGDisplayIsMain(id) != 0, usesFallbackName: names[id] == nil,
+                hardware: hardware, connectionPath: matches.count == 1 ? matches[0].path : nil)
         }
     }
 }
@@ -119,12 +125,16 @@ final class DisplayManager {
     let resolve: (DisplayRecord) -> UInt32
     let enabled: (UInt32) -> Bool
     let matchesIdentity: (UInt32, DisplayRecord) -> Bool
+    let connected: (DisplayRecord) -> Bool
+
+    var connectedOwned: [DisplayRecord] { displays.filter { owned[$0.uuid] != nil } }
 
     init(journal: RecoveryJournal = RecoveryJournal(),
          setOutput: @escaping (UInt32, Bool) -> DOSResult = { DOSSetDisplayEnabled($0, $1) },
          enumerate: @escaping () throws -> [DisplayRecord] = DisplaySystem.enumerate,
          resolve: @escaping (DisplayRecord) -> UInt32 = DisplaySystem.resolve,
          enabled: @escaping (UInt32) -> Bool = DisplaySystem.isEnabled,
+         connected: @escaping (DisplayRecord) -> Bool = DisplayConnections.isConnected,
          matchesIdentity: @escaping (UInt32, DisplayRecord) -> Bool = { id, record in
              CGDisplayIsOnline(id) == 0 || record.uuid.hasPrefix("display-id-") || DisplaySystem.uuid(for: id) == record.uuid
          }) throws {
@@ -133,15 +143,24 @@ final class DisplayManager {
         self.enumerate = enumerate
         self.resolve = resolve
         self.enabled = enabled
+        self.connected = connected
         self.matchesIdentity = matchesIdentity
         owned = try journal.load()
         try refresh()
     }
 
     func refresh() throws {
-        let live = try enumerate()
+        let previous = Dictionary(displays.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
+        let live = try enumerate().map { record -> DisplayRecord in
+            var updated = record
+            // CG 在线列表可能晚于端口拔线；沿用已确认的端口路径进行独立检查。
+            if updated.connectionPath == nil {
+                updated.connectionPath = previous[record.uuid]?.connectionPath ?? owned[record.uuid]?.connectionPath
+            }
+            return updated
+        }
         // 回调可能早于驱动更新；仅在主动恢复并确认输出后移除恢复记录。
-        displays = DisplayPolicy.merge(live, owned: owned)
+        displays = DisplayPolicy.merge(live, owned: owned, connected: connected)
     }
 
     func disable(_ uuid: String) throws {
@@ -169,11 +188,13 @@ final class DisplayManager {
         remembered.enabled = false
         remembered.online = false
         owned[uuid] = remembered
-        displays = DisplayPolicy.merge(displays.filter { $0.uuid != uuid }, owned: owned)
+        displays = DisplayPolicy.merge(displays.filter { $0.uuid != uuid }, owned: owned, connected: connected)
     }
 
     func enable(_ uuid: String) throws {
-        guard let record = displays.first(where: { $0.uuid == uuid }) ?? owned[uuid] else { return }
+        // 菜单打开后仍可能拔线；执行前再枚举，缺席设备不提交配置。
+        try refresh()
+        guard let record = displays.first(where: { $0.uuid == uuid }), connected(record) else { return }
         let id = resolve(record)
         // UUID 能重新解析时优先使用新 ID；旧 ID 不得指向另一块在线屏幕。
         if !matchesIdentity(id, record) {
@@ -199,7 +220,8 @@ final class DisplayManager {
 
     func restoreAll() -> [String] {
         var errors: [String] = []
-        for record in owned.values.sorted(by: { $0.name < $1.name }) {
+        do { try refresh() } catch { return [error.localizedDescription] }
+        for record in connectedOwned.sorted(by: { $0.name < $1.name }) {
             do { try enable(record.uuid) }
             catch { errors.append(L10n.format("error.for_display", record.localizedName, error.localizedDescription)) }
         }

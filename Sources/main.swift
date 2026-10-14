@@ -59,8 +59,16 @@ if CommandLine.arguments.contains("--localization-diagnostics") {
             let loginItemStatus: String
             let language: String
             let displays: [DisplayRecord]
+            let menuDisplays: [DisplayRecord]
+            let pendingRecoveryCount: Int
         }
-        let result = Diagnostics(backendAvailable: DOSBackendAvailable(), loginItemStatus: LoginItemState.systemState.rawValue, language: L10n.language, displays: displays)
+        let journalIndex = CommandLine.arguments.firstIndex(of: "--recovery-journal")
+        let journalURL = journalIndex.flatMap { index in
+            index + 1 < CommandLine.arguments.count ? URL(fileURLWithPath: CommandLine.arguments[index + 1]) : nil
+        }
+        let manager = try DisplayManager(journal: RecoveryJournal(url: journalURL))
+        let result = Diagnostics(backendAvailable: DOSBackendAvailable(), loginItemStatus: LoginItemState.systemState.rawValue, language: L10n.language, displays: displays,
+            menuDisplays: manager.displays, pendingRecoveryCount: manager.owned.count)
         print(String(data: try encoder.encode(result), encoding: .utf8)!)
     } catch {
         fputs("\(error.localizedDescription)\n", stderr)
